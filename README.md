@@ -1,1 +1,1 @@
-# waveshare_net
+Wi-Fi (station) + DHCP network bring-up shared by the waveshare ESP32-C6 apps

@@ -20,7 +20,10 @@ use esp_radio::wifi::{
     Config as WifiConfiguration, ControllerConfig, Interface, Ssid, WifiController,
     sta::StationConfig,
 };
-use reqwless::{client::HttpClient, request::Method};
+use reqwless::{
+    client::HttpClient,
+    request::{Method, RequestBuilder},
+};
 use static_cell::StaticCell;
 
 /// Brings up the Wi-Fi station and a DHCP-backed network stack, spawns the
@@ -98,24 +101,38 @@ pub async fn wait_for_ip(stack: &Stack<'_>, poll: Duration, max_polls: u32) -> O
     None
 }
 
+/// Returns the socket state and body buffer `http_get` needs.
+///
+/// The cells are single-use: obtain the pair once per app (e.g. when the
+/// fetch task starts) and reborrow it for each request. The 8 KiB body
+/// buffer fits multi-row batch feeds.
+pub fn http_buffers() -> (
+    &'static mut TcpClientState<1, 2048, 2048>,
+    &'static mut [u8],
+) {
+    static TCP: StaticCell<TcpClientState<1, 2048, 2048>> = StaticCell::new();
+    static RX: StaticCell<[u8; 8192]> = StaticCell::new();
+    let rx = RX.init([0u8; 8192]);
+    (TCP.init(TcpClientState::new()), &mut rx[..])
+}
+
 /// Performs a plain HTTP GET and returns the response body, read into `rx`.
 ///
-/// `tcp_state` must be created once per app and must not be shared with
-/// concurrent fetches. `TcpClientState<1, 2048, 2048>` is a comfortable
-/// default socket sizing (it comfortably fits request headers plus a ~100
-/// byte path); size `rx` to the largest expected body — the buffer stays
-/// caller-owned so it is not paid for by apps with small payloads.
+/// `headers` are attached verbatim to the request (e.g. a `Referer`). Pass
+/// the pair returned by [`http_buffers`] for `tcp_state` and `rx`.
 pub async fn http_get<'a, const N: usize, const TX: usize, const RXS: usize>(
     stack: Stack<'_>,
     tcp_state: &'static TcpClientState<N, TX, RXS>,
     rx: &'a mut [u8],
     url: &str,
+    headers: &[(&str, &str)],
 ) -> Option<&'a [u8]> {
     let tcp_client = TcpClient::new(stack, tcp_state);
     let dns = DnsSocket::new(stack);
     let mut client = HttpClient::new(&tcp_client, &dns);
 
-    let mut request = client.request(Method::GET, url).await.ok()?;
+    let request = client.request(Method::GET, url).await.ok()?;
+    let mut request = request.headers(headers);
     let response = request.send(rx).await.ok()?;
     let body = response.body().read_to_end().await.ok()?;
     Some(&*body)
